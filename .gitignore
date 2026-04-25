@@ -14,3 +14,4 @@ wheels/
 
 # test
 test-trainer
+notebooks/trl_grpo_outputs
