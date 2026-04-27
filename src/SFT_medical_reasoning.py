@@ -28,10 +28,10 @@ MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 N_MAX = 19704 # length of the medical-o1-reasoning-SFT
 SPLIT_SEED = 42
 VAL_RATIO = 0.1
-N_EPOCHS = 1
+N_EPOCHS = 10
 
 RANG = 4  # rank for LoRA
-N_SAMPLES = 3  # samples for tests
+N_SAMPLES = 1  # samples for tests
 SAMPLE_SEED = 123
 MAX_NEW_TOKENS = 2048  # length for sample generation
 MAX_SEQ_LENGTH = 512  # truncation length for training/eval to reduce memory usage
@@ -166,13 +166,13 @@ def main():
         print(f"{DATASET_DIR} is not empty -> loading from disk...")
         dataset = load_from_disk(str(DATASET_DIR))
 
-    print(dataset)
+    # print(dataset)
 
     dataset = dataset.map(
         preprocess_function,
         remove_columns=["Question", "Response", "Complex_CoT"],
     )
-    pprint(next(iter(dataset["train"])))
+    # pprint(next(iter(dataset["train"])))
 
     base_train = dataset["train"]
 
@@ -217,7 +217,7 @@ def main():
         )
 
     full_trainable, _ = count_params(model)
-    print(f"Full FT trainable: {full_trainable:,}")
+    # print(f"Full FT trainable: {full_trainable:,}")
 
     peft_config = LoraConfig(
         task_type="CAUSAL_LM",

@@ -19,3 +19,4 @@ notebooks/outputs
 datasets
 models
 logs
+logs/trackio
