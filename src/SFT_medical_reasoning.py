@@ -3,37 +3,51 @@
 
 from pathlib import Path
 from pprint import pprint
+from time import perf_counter
+import os
 
 import numpy as np
 import pandas as pd
 import torch
 from datasets import load_dataset, load_from_disk
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import SFTConfig, SFTTrainer
-from time import perf_counter
+
+
+TRACKIO_LOCAL_DIR = Path(__file__).resolve().parents[1] / "logs" / "trackio"
+os.environ.setdefault("TRACKIO_DIR", str(TRACKIO_LOCAL_DIR))
+import trackio
 
 
 HF_DATASET_ID = "FreedomIntelligence/medical-o1-reasoning-SFT"
 HF_CONFIG = "en"
 MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
-N_MAX = 1000 # a subset of the dataset to validate pipeline
-# N_MAX = 19704 # length of the medical-o1-reasoning-SFT
+# N_MAX = 1000 # a subset of the dataset to validate pipeline
+N_MAX = 19704 # length of the medical-o1-reasoning-SFT
 SPLIT_SEED = 42
 VAL_RATIO = 0.1
-N_EPOCHS = 3
+N_EPOCHS = 1
 
 RANG = 4  # rank for LoRA
 N_SAMPLES = 3  # samples for tests
 SAMPLE_SEED = 123
-MAX_NEW_TOKENS = 2048  # length of generation
+MAX_NEW_TOKENS = 2048  # length for sample generation
+MAX_SEQ_LENGTH = 512  # truncation length for training/eval to reduce memory usage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATASET_DIR = PROJECT_ROOT / "datasets"
 MODEL_DIR = PROJECT_ROOT / "models" / "qwen2_5_3b_instruct"
-OUTPUT_DIR = PROJECT_ROOT / "notebooks" / "outputs" / "sft-medical"
+OUTPUT_DIR = PROJECT_ROOT / "models" / "trained" / "sft-medical"
 FINAL_MODEL_DIR = OUTPUT_DIR / "final-model"
+
+TRACKIO_PROJECT = "medical-sft-reasoning"
+TRACKIO_ENABLED = True
+LOGGING_STEPS = 25  # Log train loss every 25 steps for visibility of metrics progression
+EVAL_STEPS = 100 # evaluate and log eval loss every 100 steps
+SAVE_STEPS = 500 # saving check points
+
 
 
 def preprocess_function(example):
@@ -98,6 +112,45 @@ def seconds_to_hms(total_seconds: float) -> str:
     minutes, seconds = divmod(rem, 60)
     return f"{hours:02d}h {minutes:02d}m {seconds:02d}s"
 
+
+def init_trackio() -> bool:
+    if not TRACKIO_ENABLED:
+        print("Trackio is disabled by configuration.")
+        return False
+
+    try:
+        trackio.init(project=TRACKIO_PROJECT)
+        print(f"Trackio initialized for project: {TRACKIO_PROJECT}")
+        return True
+    except Exception as exc:
+        # Training should continue even if experiment tracking fails.
+        print(f"Trackio initialization failed. Continuing without Trackio. Reason: {exc}")
+        return False
+
+
+class LocalTrackioMetricsCallback(TrainerCallback):
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self.logged_steps = set()
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        """Called after evaluation phase to log eval metrics"""
+        if not self.enabled or not state.is_world_process_zero or not metrics:
+            return
+
+        current_step = state.global_step
+        if current_step not in self.logged_steps:
+            trackio_metrics = {}
+            for key, value in metrics.items():
+                if isinstance(value, (int, float)):
+                    trackio_metrics[key] = float(value)
+
+            if trackio_metrics:
+                trackio_metrics["train/global_step"] = float(current_step)
+                trackio_metrics["epoch"] = float(state.epoch) if hasattr(state, 'epoch') else float(current_step / 6)
+                trackio.log(trackio_metrics, step=current_step)
+                self.logged_steps.add(current_step)
+                print(f"[Trackio] Logged eval metrics at step {current_step}: {len(trackio_metrics)} metrics")
 
 def main():
     DATASET_DIR.mkdir(parents=True, exist_ok=True)
@@ -193,19 +246,29 @@ def main():
         gradient_accumulation_steps=16,
         learning_rate=2e-4,
         num_train_epochs=N_EPOCHS,
-        logging_strategy="epoch",
+        max_length=MAX_SEQ_LENGTH,
+        logging_strategy="steps",
+        logging_steps=LOGGING_STEPS,
         logging_dir="./logs",
-        save_steps=100,
+        save_steps=SAVE_STEPS,  # steps per epoch = #training samples / (batch size x gradient acc)
         gradient_checkpointing=True,
         bf16=True,
         eval_strategy="steps",
-        eval_steps=100,
+        eval_steps=EVAL_STEPS,  # steps per epoch = #training samples / (batch size x gradient acc)
         save_strategy="steps",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         eval_accumulation_steps=8,
+        run_name=f"sft-medical-nmax-{N_MAX}-epochs-{N_EPOCHS}-r-{RANG}",
+        report_to="none",
     )
+
+    trackio_ready = init_trackio()
+    if trackio_ready:
+        print(
+            "Trackio will receive Trainer metrics (loss, eval_loss, learning_rate, eval_token_accuracy)."
+        )
 
     trainer = SFTTrainer(
         model=lora_model,
@@ -214,13 +277,17 @@ def main():
         eval_dataset=val_ds,
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        callbacks=[LocalTrackioMetricsCallback(enabled=trackio_ready)],
     )
 
     print(f"\nTraining...\n")
-    
+
     t0 = perf_counter()
     trainer.train()
     elapsed = perf_counter() - t0
+    trainer.log({"train_elapsed_seconds": float(round(elapsed, 3))})
+    if trackio_ready:
+        trackio.finish()
 
     FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(FINAL_MODEL_DIR))
