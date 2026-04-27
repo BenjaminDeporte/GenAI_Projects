@@ -46,7 +46,7 @@ TRACKIO_PROJECT = "medical-sft-reasoning"
 TRACKIO_ENABLED = True
 LOGGING_STEPS = 25  # Log train loss every 25 steps for visibility of metrics progression
 EVAL_STEPS = 100 # evaluate and log eval loss every 100 steps
-SAVE_STEPS = 500 # saving check points
+SAVE_STEPS = 500 # saving checkpoints
 
 
 
