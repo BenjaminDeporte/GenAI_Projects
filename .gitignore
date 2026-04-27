@@ -18,3 +18,4 @@ notebooks/trl_grpo_outputs
 notebooks/outputs
 datasets
 models
+logs
